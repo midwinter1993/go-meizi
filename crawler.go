@@ -2,17 +2,39 @@ package main
 
 import (
     "fmt"
-    "net/http"
-    "io/ioutil"
-    "regexp"
-    "os"
     "io"
-    "strconv"
+    "io/ioutil"
+    "net/http"
+    "os"
     "path"
+    "regexp"
+    "strconv"
     "time"
 )
 
+type ImageInfo struct {
+    img_page_url string
+    img_fpath string
+}
+
+type AlbumInfo struct {
+    album_url string
+    album_dir string
+    album_title string
+    album_nr_img int
+}
+
+func (info *AlbumInfo)String() string {
+    return fmt.Sprintf("url: %s\ndir: %s\ntitle: %s\n#img: %d",
+                       info.album_url,
+                       info.album_dir,
+                       info.album_title,
+                       info.album_nr_img)
+}
+
 var IMG_DIR = "./images"
+var SITE_URL = "http://www.mzitu.com"
+var TOT_NR_TO_DOWNLOAD = 10000
 
 var downloaded = make(map[string]bool)
 
@@ -31,6 +53,8 @@ func load_downloaded() {
     files, err := ioutil.ReadDir(IMG_DIR)
     if err != nil {
         fmt.Println(err)
+        fmt.Println("Create Dir:", IMG_DIR)
+        create_dir(IMG_DIR)
     }
 
     for _, f := range files {
@@ -103,10 +127,9 @@ func album_tot_nr(url string, html string) int {
         return -1
     }
     pat := fmt.Sprintf("<a href='%s/(\\d+)'>", url)
-    fmt.Println(pat)
     r, _ := regexp.Compile(pat)
     matches := r.FindAllStringSubmatch(html, -1)
-    // fmt.Println(matches)
+
     max_nr := 0
     for _, m := range matches {
         i, _ := strconv.Atoi(m[1])
@@ -117,41 +140,32 @@ func album_tot_nr(url string, html string) int {
     return max_nr
 }
 
-func download_album(album_url string) {
+func extract_album_info(album_url string) *AlbumInfo {
     html := get_html(album_url)
-    // fmt.Println(html)
 
     title := album_title(html)
     if is_downloaded(title) {
-        return
+        return nil
     }
     add_downloaded(title)
-    fmt.Println(title)
 
     album_dir := path.Join(IMG_DIR, title)
-    create_dir(album_dir)
-
     max_nr := album_tot_nr(album_url, html)
-    for i := 1; i <= max_nr; i += 1 {
-        img_page_url := fmt.Sprintf("%s/%d", album_url, i)
 
-        fname := fmt.Sprintf("%d.jpg", i)
-        fpath := path.Join(album_dir, fname)
-
-        fmt.Println(img_page_url, fpath)
-
-        download_img(img_page_url, fpath)
-        time.Sleep(1000 * time.Millisecond)
-    }
+    info := new(AlbumInfo)
+    info.album_url = album_url
+    info.album_dir = album_dir
+    info.album_title = title
+    info.album_nr_img = max_nr
+    return info
 }
 
 //===============================================
 // Download an image from one page containing
 // an image
 //-----------------------------------------------
-func download_img(url string, fpath string) {
-    img_url := extract_img_url(get_html(url))
-    // fmt.Println(img_url)
+func download_img(img_page_url string, fpath string) {
+    img_url := extract_img_url(get_html(img_page_url))
     download_file(img_url, fpath)
 }
 
@@ -161,7 +175,6 @@ func extract_img_url(html string) string {
         return ""
     }
     r, _ := regexp.Compile("<img src=\"(.*)\" alt.*/>")
-    // fmt.Println(r.FindStringSubmatch(html))
     match := r.FindStringSubmatch(html)
     return match[1]
 }
@@ -196,19 +209,50 @@ func download_file(url string, fpath string) (err error) {
 }
 
 //===============================================
+func img_crawler(img_info_chan chan ImageInfo) {
+    nr_downloaded := 0
 
-func main() {
-    load_downloaded()
-    site_url := "http://www.mzitu.com"
-    // download_album(url)
-    for i := 1; i < 3; i += 1 {
-        page_url := fmt.Sprintf("%s/page/%d/", site_url, i)
+    for i := 1; i < TOT_NR_TO_DOWNLOAD/30; i += 1 {
+        page_url := fmt.Sprintf("%s/page/%d/", SITE_URL, i)
 
         html := get_html(page_url)
         album_urls := extract_album_url(html)
         for _, u := range album_urls {
-            fmt.Println(u)
-            // download_album(u)
+            // fmt.Println(u)
+            info := extract_album_info(u)
+            if info == nil {
+                continue
+            }
+            fmt.Println(info)
+
+            for i := 1; i <= info.album_nr_img; i += 1 {
+                img_page_url := fmt.Sprintf("%s/%d", info.album_url, i)
+
+                fname := fmt.Sprintf("%d.jpg", i)
+                fpath := path.Join(info.album_dir, fname)
+
+                create_dir(info.album_dir)
+
+                nr_downloaded += 1
+                img_info_chan <- ImageInfo{img_page_url, fpath}
+            }
         }
+        if nr_downloaded > TOT_NR_TO_DOWNLOAD {
+            break
+        }
+        time.Sleep(1000 * time.Millisecond)
+    }
+    close(img_info_chan)
+}
+
+func main() {
+    load_downloaded()
+
+    img_info_chan := make(chan ImageInfo, 300)
+    go img_crawler(img_info_chan)
+
+    for i := range img_info_chan {
+        download_img(i.img_page_url, i.img_fpath)
+        time.Sleep(1000 * time.Millisecond)
     }
 }
